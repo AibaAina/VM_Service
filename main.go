@@ -1,104 +1,61 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"log"
 	"net/http"
-	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/gorilla/mux"
 )
 
-type Section map[string]string
-type AppInfo struct {
-	Version string `json:"version"`
+// ApmRequest represents the expected JSON format for the /APM_switch endpoint.
+type ApmRequest struct {
+	Switch string `json:"switch"`
+	Fab    string `json:"fab"`
 }
 
-var appPathMapping = map[string]string{
-	"app1": "appinfo.json",
-	"app2": "app2/appinfo.json",
-	// add more mappings here
-}
-
-func parseIniFile(path string) (map[string]Section, error) {
-	file, err := os.Open(path)
+func apmSwitchHandler(w http.ResponseWriter, r *http.Request) {
+	var request ApmRequest
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&request)
 	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	data := make(map[string]Section)
-	section := "default"
-	data[section] = make(Section)
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip comments and empty lines
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-			continue
-		}
-
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.Trim(line, "[]")
-			data[section] = make(Section)
-			continue
-		}
-
-		if eqIndex := strings.Index(line, "="); eqIndex != -1 {
-			key := strings.TrimSpace(line[:eqIndex])
-			value := strings.TrimSpace(line[eqIndex+1:])
-			data[section][key] = value
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return data, nil
-}
-
-func handleConfigs(w http.ResponseWriter, r *http.Request) {
-	data, err := parseIniFile("test.ini")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
-}
-
-func handleVersion(w http.ResponseWriter, r *http.Request) {
-	appName := r.URL.Query().Get("app_name")
-	appPath, ok := appPathMapping[appName]
-	if !ok {
-		http.Error(w, "Invalid app name", http.StatusBadRequest)
-		return
-	}
-
-	jsonFile, err := os.Open(appPath)
+	// Assuming apm.ps1 is in the same directory as the executable.
+	scriptPath, err := filepath.Abs("D:/Documents/VScode/VM_Service/VM_Service/apm.ps1")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println("Error finding script path:", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	defer jsonFile.Close()
+	fmt.Printf(scriptPath)
 
-	byteValue, _ := ioutil.ReadAll(jsonFile)
+	// Constructing the PowerShell command.
+	command := exec.Command("powershell", "-File", scriptPath, request.Switch, request.Fab)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		log.Println("Error running PowerShell script:", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 
-	var appInfo AppInfo
-	json.Unmarshal(byteValue, &appInfo)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(appInfo.Version)
+	response := strings.TrimSpace(string(output))
+	fmt.Fprintf(w, "Script Output:\n%s", response)
 }
 
 func main() {
-	http.HandleFunc("/configs", handleConfigs)
-	http.HandleFunc("/version", handleVersion)
-	fmt.Println("Starting server on port 8080")
-	http.ListenAndServe(":8080", nil)
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/APM_switch", apmSwitchHandler).Methods("POST")
+
+	port := 8080 // You can change the port as needed
+	addr := fmt.Sprintf(":%d", port)
+
+	fmt.Printf("Server listening on %s...\n", addr)
+	log.Fatal(http.ListenAndServe(addr, router))
 }
